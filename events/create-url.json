@@ -1,0 +1,1 @@
+{"version":"2.0","routeKey":"POST /api/urls","rawPath":"/api/urls","headers":{"content-type":"application/json"},"requestContext":{"http":{"method":"POST","path":"/api/urls"}},"body":"{\"originalUrl\":\"https://example.com/products/cloud\",\"expiryDays\":30}","isBase64Encoded":false}

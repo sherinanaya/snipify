@@ -1,0 +1,1 @@
+package com.snipify.model; public record CreateUrlRequest(String originalUrl, Integer expiryDays) {}

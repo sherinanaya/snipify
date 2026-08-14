@@ -1,0 +1,1 @@
+package com.snipify.model; public record UrlMapping(String shortCode, String originalUrl, String createdAt, Long expiresAt, String status) {}

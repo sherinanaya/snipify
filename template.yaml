@@ -1,0 +1,170 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: Snipify Milestones 2 and 3 - Redis cache and S3 frontend
+
+Parameters:
+  StageName:
+    Type: String
+    Default: dev
+  VpcId:
+    Type: AWS::EC2::VPC::Id
+    Description: VPC used by Lambda and ElastiCache
+  PrivateSubnetIds:
+    Type: List<AWS::EC2::Subnet::Id>
+    Description: At least two subnets in different Availability Zones
+  RouteTableIds:
+    Type: CommaDelimitedList
+    Description: Route tables associated with the selected Lambda subnets
+
+Globals:
+  Function:
+    Runtime: java21
+    Architectures: [arm64]
+    MemorySize: 768
+    Timeout: 15
+    CodeUri: .
+    VpcConfig:
+      SecurityGroupIds: [!Ref LambdaSecurityGroup]
+      SubnetIds: !Ref PrivateSubnetIds
+    Environment:
+      Variables:
+        TABLE_NAME: !Ref UrlMappingsTable
+        BASE_URL: !Sub 'https://${SnipifyApi}.execute-api.${AWS::Region}.${AWS::URLSuffix}/${StageName}'
+        REDIS_HOST: !GetAtt SnipifyCache.Endpoint.Address
+        REDIS_PORT: !GetAtt SnipifyCache.Endpoint.Port
+        CACHE_TTL_SECONDS: '3600'
+
+Resources:
+  SnipifyApi:
+    Type: AWS::Serverless::HttpApi
+    Properties:
+      StageName: !Ref StageName
+      CorsConfiguration:
+        AllowOrigins: ['*']
+        AllowHeaders: ['content-type']
+        AllowMethods: [GET, POST, OPTIONS]
+
+  UrlMappingsTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: shortCode
+          AttributeType: S
+      KeySchema:
+        - AttributeName: shortCode
+          KeyType: HASH
+      TimeToLiveSpecification:
+        AttributeName: expiresAt
+        Enabled: true
+      SSESpecification: { SSEEnabled: true }
+
+  LambdaSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Snipify Lambda outbound access
+      VpcId: !Ref VpcId
+      SecurityGroupEgress:
+        - IpProtocol: '-1'
+          CidrIp: 0.0.0.0/0
+
+  CacheSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Allow Redis TLS from Snipify Lambda only
+      VpcId: !Ref VpcId
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 6379
+          ToPort: 6379
+          SourceSecurityGroupId: !Ref LambdaSecurityGroup
+
+  DynamoDbEndpoint:
+    Type: AWS::EC2::VPCEndpoint
+    Properties:
+      VpcEndpointType: Gateway
+      VpcId: !Ref VpcId
+      ServiceName: !Sub 'com.amazonaws.${AWS::Region}.dynamodb'
+      RouteTableIds: !Ref RouteTableIds
+
+  SnipifyCache:
+    Type: AWS::ElastiCache::ServerlessCache
+    Properties:
+      ServerlessCacheName: !Sub 'snipify-${StageName}'
+      Description: Snipify Redis OSS cache-aside layer
+      Engine: redis
+      MajorEngineVersion: '7'
+      SecurityGroupIds: [!Ref CacheSecurityGroup]
+      SubnetIds: !Ref PrivateSubnetIds
+      CacheUsageLimits:
+        DataStorage:
+          Maximum: 1
+          Unit: GB
+        ECPUPerSecond:
+          Maximum: 1000
+
+  CreateUrlFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      Handler: com.snipify.handler.CreateUrlHandler::handleRequest
+      Policies:
+        - DynamoDBWritePolicy: { TableName: !Ref UrlMappingsTable }
+        - AWSLambdaVPCAccessExecutionRole
+      Events:
+        CreateUrl:
+          Type: HttpApi
+          Properties: { ApiId: !Ref SnipifyApi, Path: /api/urls, Method: POST }
+
+  RedirectUrlFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      Handler: com.snipify.handler.RedirectUrlHandler::handleRequest
+      Policies:
+        - DynamoDBReadPolicy: { TableName: !Ref UrlMappingsTable }
+        - AWSLambdaVPCAccessExecutionRole
+      Events:
+        Redirect:
+          Type: HttpApi
+          Properties: { ApiId: !Ref SnipifyApi, Path: '/{shortCode}', Method: GET }
+
+  WebsiteBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      WebsiteConfiguration:
+        IndexDocument: index.html
+        ErrorDocument: index.html
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: false
+        IgnorePublicAcls: false
+        BlockPublicPolicy: false
+        RestrictPublicBuckets: false
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault: { SSEAlgorithm: AES256 }
+
+  WebsiteBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref WebsiteBucket
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: PublicReadForCampusDemo
+            Effect: Allow
+            Principal: '*'
+            Action: s3:GetObject
+            Resource: !Sub '${WebsiteBucket.Arn}/*'
+
+Outputs:
+  ApiBaseUrl:
+    Value: !Sub 'https://${SnipifyApi}.execute-api.${AWS::Region}.${AWS::URLSuffix}/${StageName}'
+  CreateUrlEndpoint:
+    Value: !Sub 'https://${SnipifyApi}.execute-api.${AWS::Region}.${AWS::URLSuffix}/${StageName}/api/urls'
+  WebsiteBucketName:
+    Value: !Ref WebsiteBucket
+  WebsiteUrl:
+    Value: !GetAtt WebsiteBucket.WebsiteURL
+  CacheEndpoint:
+    Value: !GetAtt SnipifyCache.Endpoint.Address
+  UrlMappingsTableName:
+    Value: !Ref UrlMappingsTable
